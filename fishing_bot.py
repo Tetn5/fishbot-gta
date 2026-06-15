@@ -1,6 +1,6 @@
 """
 =============================================================
-  بوت الصيد - GTA RP  v8.0
+  بوت الصيد - GTA RP  v8.1
   + صوت تنبيه
   + Hotkey تشغيل/إيقاف
   + إيقاف تلقائي لو اللعبة أُغلقت
@@ -9,7 +9,7 @@
   + حفظ الإعدادات
   + تحديث تلقائي من GitHub
 =============================================================
-  pip install pydirectinput pyautogui requests keyboard psutil
+  pip install pydirectinput requests keyboard psutil
 =============================================================
 """
 
@@ -17,7 +17,6 @@ import sys, time, threading, json, os, subprocess, winsound
 import tkinter as tk
 from tkinter import scrolledtext, messagebox, ttk
 import pydirectinput
-import pyautogui
 import requests
 import keyboard
 import psutil
@@ -173,33 +172,131 @@ class GameWatcher:
 class Updater:
     @staticmethod
     def check():
+        """فحص التحديث — يتعامل مع انقطاع الإنترنت بدقة"""
         try:
             r = requests.get(VERSION_URL, timeout=5)
             if r.status_code == 200:
                 latest = r.text.strip()
                 if latest != CURRENT_VERSION:
                     return True, latest
-        except Exception:
-            pass
+        except requests.exceptions.ConnectionError:
+            pass   # لا يوجد إنترنت
+        except requests.exceptions.Timeout:
+            pass   # انتهى وقت الاتصال
+        except requests.exceptions.RequestException:
+            pass   # أي خطأ شبكة آخر
         return False, CURRENT_VERSION
 
     @staticmethod
+    def _verify_syntax(code: str) -> bool:
+        """يتحقق من أن الكود خالٍ من أخطاء نحوية قبل الكتابة"""
+        try:
+            compile(code, "<update>", "exec")
+            return True
+        except SyntaxError as e:
+            return False
+
+    @staticmethod
+    def _compute_hash(data: bytes) -> str:
+        """يحسب SHA-256 للملف"""
+        import hashlib
+        return hashlib.sha256(data).hexdigest()
+
+    @staticmethod
     def download_and_restart(log_fn):
+        """
+        تحميل آمن:
+        1. تحميل الملف الجديد
+        2. التحقق من عدم تشوهه (SHA-256 من GitHub)
+        3. التحقق من خلوه من أخطاء نحوية
+        4. نسخ احتياطي من الملف الحالي
+        5. كتابة الملف الجديد باسم مؤقت أولاً
+        6. إعادة التشغيل
+        """
         try:
             log_fn("📥 جاري تحميل التحديث...", "yellow")
-            r = requests.get(SCRIPT_URL, timeout=15)
-            if r.status_code != 200:
-                log_fn(f"❌ فشل: {r.status_code}", "red")
+
+            # ── تحميل الملف الجديد ──
+            try:
+                r = requests.get(SCRIPT_URL, timeout=20)
+            except requests.exceptions.RequestException as e:
+                log_fn(f"❌ خطأ في الشبكة: {e}", "red")
                 return
-            script = os.path.abspath(__file__)
-            open(script + ".backup", "wb").write(open(script, "rb").read())
-            open(script, "w", encoding="utf-8").write(r.text)
-            log_fn("✅ تم! إعادة التشغيل...", "green")
-            time.sleep(1.5)
-            subprocess.Popen([sys.executable, script])
+
+            if r.status_code != 200:
+                log_fn(f"❌ فشل التحميل: HTTP {r.status_code}", "red")
+                return
+
+            new_code  = r.text
+            new_bytes = r.content
+
+            # ── التحقق من الحجم (حماية من التحميل الجزئي) ──
+            if len(new_bytes) < 1000:
+                log_fn("❌ الملف المحمّل صغير جداً — تحميل جزئي؟ إلغاء.", "red")
+                return
+
+            # ── التحقق من SHA-256 (لو موجود على GitHub) ──
+            hash_url = SCRIPT_URL + ".sha256"
+            try:
+                hr = requests.get(hash_url, timeout=5)
+                if hr.status_code == 200:
+                    expected = hr.text.strip().lower()
+                    actual   = Updater._compute_hash(new_bytes)
+                    if actual != expected:
+                        log_fn(f"❌ Hash غير متطابق! الملف قد يكون تالفاً. إلغاء.", "red")
+                        return
+                    log_fn(f"✅ SHA-256 صحيح", "green")
+            except requests.exceptions.RequestException:
+                log_fn("⚠️  ملف SHA-256 غير موجود — تخطي فحص Hash", "yellow")
+
+            # ── التحقق من الصحة النحوية ──
+            log_fn("🔍 فحص الكود...", "yellow")
+            if not Updater._verify_syntax(new_code):
+                log_fn("❌ الكود يحتوي على أخطاء نحوية! إلغاء التحديث.", "red")
+                return
+            log_fn("✅ الكود سليم نحوياً", "green")
+
+            script      = os.path.abspath(__file__)
+            temp_script = script + ".new"
+            backup      = script + ".backup"
+
+            # ── كتابة الملف الجديد باسم مؤقت أولاً ──
+            try:
+                open(temp_script, "w", encoding="utf-8").write(new_code)
+            except OSError as e:
+                log_fn(f"❌ فشل كتابة الملف المؤقت: {e}", "red")
+                return
+
+            # ── نسخة احتياطية من الملف الحالي ──
+            try:
+                open(backup, "wb").write(open(script, "rb").read())
+                log_fn("💾 نسخة احتياطية: fishing_bot.py.backup", "white")
+            except OSError:
+                pass   # إذا فشل الباكب لا نوقف التحديث
+
+            # ── تشغيل الملف الجديد مؤقتاً ليحل محل القديم ──
+            # الملف المؤقت يحذف القديم ويعيد تسمية نفسه عند التشغيل
+            # الحل: نشغّل launcher بسيط يستبدل الملف
+            launcher_code = f"""
+import os, sys, time, subprocess
+time.sleep(1.5)
+try:
+    os.replace({repr(temp_script)}, {repr(script)})
+except Exception as e:
+    print(f"خطأ في الاستبدال: {{e}}")
+    sys.exit(1)
+subprocess.Popen([sys.executable, {repr(script)}])
+"""
+            launcher_path = script + ".launcher.py"
+            open(launcher_path, "w", encoding="utf-8").write(launcher_code)
+
+            log_fn("✅ تم التحقق! جاري إعادة التشغيل...", "green")
+            time.sleep(0.5)
+            subprocess.Popen([sys.executable, launcher_path])
             os._exit(0)
+
         except Exception as e:
-            log_fn(f"❌ خطأ: {e}", "red")
+            log_fn(f"❌ خطأ غير متوقع: {e}", "red")
 
 
 # ══════════════════════════════════════════════════════════════
@@ -801,7 +898,6 @@ class App(tk.Tk):
 if __name__ == "__main__":
     for pkg, name in [
         ("pydirectinput", "pydirectinput"),
-        ("pyautogui",     "pyautogui"),
         ("requests",      "requests"),
         ("keyboard",      "keyboard"),
         ("psutil",        "psutil"),
@@ -810,7 +906,7 @@ if __name__ == "__main__":
             __import__(pkg)
         except ImportError:
             print(f"❌ مكتبة مفقودة: {name}")
-            print("ثبّت: pip install pydirectinput pyautogui requests keyboard psutil")
+            print("ثبّت: pip install pydirectinput requests keyboard psutil")
             sys.exit(1)
 
     App().mainloop()
