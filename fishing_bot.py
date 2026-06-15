@@ -29,7 +29,7 @@ GITHUB_USER   = "Tetn5"
 GITHUB_REPO   = "fishbot-gta"
 GITHUB_BRANCH = "main"
 
-CURRENT_VERSION = "8.0"
+CURRENT_VERSION = "1.0"
 _RAW        = f"https://raw.githubusercontent.com/{GITHUB_USER}/{GITHUB_REPO}/{GITHUB_BRANCH}"
 VERSION_URL = f"{_RAW}/version.txt"
 SCRIPT_URL  = f"{_RAW}/fishing_bot.py"
